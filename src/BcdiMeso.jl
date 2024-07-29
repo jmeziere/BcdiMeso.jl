@@ -1,5 +1,9 @@
 module BcdiMeso
+    using CUDA
+    using Optim
+    using LineSearches
+    using BcdiCore
 
-# Write your package code here.
-
+    include("State.jl")
+    include("Operators.jl")
 end
