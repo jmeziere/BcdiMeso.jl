@@ -1,6 +1,6 @@
 module DummyDocs
 
-export State,ER,HIO,Shrink,Center,Mount
+export State,OptimizeState
 
 """
     OptimizeState(state, primitiveRecipLattice, numPeaks)
