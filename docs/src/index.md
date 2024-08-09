@@ -10,7 +10,7 @@ Currently, this entire package must be run with access to GPUs. This may change 
 
 ## Installation
 
-Currently, BcdiStrain.jl is not registered in the Julia general registry. BcdiTrad.jl can be installed by running in the REPL package manager (```]```):
+Currently, BcdiStrain.jl is registered in the Julia general registry and can be installed by running in the REPL package manager (```]```):
 
 ```
 add BcdiMeso
