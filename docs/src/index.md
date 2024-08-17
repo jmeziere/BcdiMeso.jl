@@ -1,17 +1,19 @@
-# BcdiMeso.jl Documentation
+# Julia BCDI Documentation
 
 ## About
 
-Bragg Coherent Diffraction Imaging (BCDI) Meso (Mesoscale) implements phase retrieval for mesoscale models with stochastic gradient descent. Some of the core functionality of this project is implemented in BcdiCore.jl. Additionally, this package is part of a collection of BCDI packages consisting of BcdiAtomic.jl (an atomic scale BCDI solver), BcdiMeso.jl (a mesoscale BCDI Solver), and BcdiMulti.jl (a multiscale BCDI solver).
+The BYU-CXI research group maintains a suite of Julia packages to solve the Bragg Coherent Diffraction Imaging (BCDI) problem in several different regimes and circumstance. 
 
-While this package is marked as BCDI specific, the methods are more general and can be used in many phase retrieval problems. In the future, this package may be incorporated into a more general phase retrieval package.
+- [BcdiCore.jl](https://byu-cxi.github.io/BcdiCore.jl/dev) implements all of the Fourier transforms for the Julia BCDI packages. In addition, BcdiCore calculates the loss function used (either ``L_2`` or the MLE estimator) and derivatives of these loss functions.
 
-Currently, this entire package must be run with access to GPUs. This may change in the future (especially if Issues requesting it are opened), but for our research group, using GPUs is a necessity.
+- [BcdiTrad.jl](https://byu-cxi.github.io/BcdiTrad.jl/dev) implements projection-based BCDI algorithm. Currently, this is limited to ER, HIO, and shrinkwrap. 
 
-## Installation
+- [BcdiStrain.jl](https://byu-cxi.github.io/BcdiStrain.jl/dev) implements a multi-peak BCDI algorithm developed by the BYU-CXI group. In addition to the alogrithms present in BcdiTrad, BcdiStrain also implements Mount, an operator that switches between peaks.
 
-Currently, BcdiStrain.jl is registered in the Julia general registry and can be installed by running in the REPL package manager (```]```):
+- [BcdiMeso.jl](https://byu-cxi.github.io/BcdiMeso.jl/dev) implements a BCDI algorithm that solves in the mesoscale regime. Instead of using projections, this algorithm uses a gradient-based optimization scheme. Additionally, BcdiMeso does not assume a small measurement distance away from the peak.
 
-```
-add BcdiMeso
-```
+- BcdiAtomic.jl is an upcoming BCDI package that implements a BCDI algorithm that solves at the atomic scale.
+
+- BcdiMulti.jl is an upcoming BCDI package that implements a multiscale BCDI algorithm that solves at both the mesoscale and the atomic scale.
+
+- BcdiSimulate.jl is an upcoming BCDI package that simulates the BCDI problem. Currently, this is only implimented at the atomic scale.
