@@ -14,6 +14,6 @@ This short script applies 100 stochastic gradient descent iterations iterations.
 # API
 
 ```@docs
-State(intens, gVecs, recSupport, x, y, z, rho, ux, uy, uz)
-OptimizeState(state, primitiveRecipLattice, numPeaks)
+BcdiMeso.State(intens, gVecs, recSupport, x, y, z, rho, ux, uy, uz)
+BcdiMeso.OptimizeState(state, primitiveRecipLattice, numPeaks)
 ```

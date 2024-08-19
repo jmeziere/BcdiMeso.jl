@@ -1,6 +1,4 @@
-using Documenter
-include("DummyDocs.jl")
-using .DummyDocs
+using Documenter, BcdiMeso
 
 makedocs(
     sitename="BcdiMeso.jl",
@@ -8,8 +6,7 @@ makedocs(
         prettyurls = get(ENV, "CI", nothing) == "true"
     ),
     pages = [
-        "BCDI"=>"index.md",
-        "BcdiMeso"=>"main.md",
+        "BcdiMeso"=>"index.md",
         "Usage"=>"use.md"
     ]
 )
