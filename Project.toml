@@ -1,7 +1,7 @@
 name = "BcdiMeso"
 uuid = "1ffc817a-885e-4a73-a887-574cb954c7d7"
 authors = ["Jason Meziere"]
-version = "0.0.1"
+version = "0.0.2"
 
 [deps]
 BcdiCore = "72eb6a3e-ca63-4742-b260-85b05ca6d9e4"
@@ -11,7 +11,7 @@ Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 
 [compat]
 julia = "1.10"
-BcdiCore = "0.0.1"
+BcdiCore = "0"
 CUDA = "5.4.3"
 LineSearches = "7.3.0"
 Optim = "1.9.4"
