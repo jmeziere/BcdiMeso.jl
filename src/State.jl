@@ -1,3 +1,8 @@
+"""
+   Create an object that performs an iteration of stochastic gradient descent.
+
+Create the reconstruction state.
+"""
 struct State
     x::CuArray{Float64, 1, CUDA.Mem.DeviceBuffer}
     y::CuArray{Float64, 1, CUDA.Mem.DeviceBuffer}

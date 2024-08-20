@@ -50,6 +50,11 @@ function (is::LinearStep)(ls, state, phi_0, dphi_0, df)
     state.alpha = min(alphaguess, max_alpha)
 end
 
+"""
+    OptimizeState(state, primitiveRecipLattice, numPeaks)
+
+Create an object that performs an iteration of stochastic gradient descent.
+"""
 struct OptimizeState <: Operator
     numPeaks::Int64
     AInv::CuArray{Float64, 2, CUDA.Mem.DeviceBuffer}
