@@ -54,6 +54,13 @@ end
     OptimizeState(state, primitiveRecipLattice, numPeaks)
 
 Create an object that performs an iteration of stochastic gradient descent.
+`numPeaks` number of peaks are selected randomly. One step of gradient descent
+is taken using the More-Thuente linesearch.
+
+This implimentation takes into account effects of small angle measurement 
+usually ignored in the BCDI problem. This is described in [carnis_towards_2019](@cite)
+although this implimentation will be faster because a NUFFT is used instead of
+many FFTs.
 """
 struct OptimizeState <: Operator
     numPeaks::Int64

@@ -21,7 +21,7 @@ jobs:
           version: '1.10'
       - uses: julia-actions/cache@v1
       - name: Install dependencies
-        run: julia --project=docs/ -e 'using Pkg; Pkg.add(["Documenter","BcdiMeso"]); Pkg.instantiate()'
+        run: julia --project=docs/ -e 'using Pkg; Pkg.add(["Documenter","DocumenterCitations"]); Pkg.develop(url="https://github.com/byu-cxi/BcdiMeso.jl.git"); Pkg.instantiate()'
       - name: Build and deploy
         env:
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }} # If authenticating with SSH deploy key

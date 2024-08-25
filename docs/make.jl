@@ -1,5 +1,7 @@
 using Documenter, BcdiMeso
 
+bib = CitationBibliography(joinpath(@__DIR__, "src", "refs.bib"))
+
 makedocs(
     sitename="BcdiMeso.jl",
     format = Documenter.HTML(
@@ -7,8 +9,10 @@ makedocs(
     ),
     pages = [
         "BcdiMeso"=>"index.md",
-        "Usage"=>"use.md"
-    ]
+        "Usage"=>"use.md",
+        "References"=>"refs.md"
+    ],
+    plugins = [bib]
 )
 
 deploydocs(
