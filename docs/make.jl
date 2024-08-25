@@ -1,4 +1,4 @@
-using Documenter, BcdiMeso
+using Documenter, DocumenterCitations, BcdiMeso
 
 bib = CitationBibliography(joinpath(@__DIR__, "src", "refs.bib"))
 
