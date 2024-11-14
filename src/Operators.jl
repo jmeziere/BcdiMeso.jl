@@ -11,45 +11,6 @@ function operate(ol::OperatorList, state::State)
     end
 end
 
-struct LinearStep
-    x::CUDA.CuArray{Float64, 1, CUDA.DeviceMemory}
-    y::CUDA.CuArray{Float64, 1, CUDA.DeviceMemory}
-    z::CUDA.CuArray{Float64, 1, CUDA.DeviceMemory}
-    alpha0::Float64
-    dphi_0_previous::Base.RefValue{Float64}
-
-    function LinearStep(state, alpha0)
-        new(state.x, state.y, state.z, alpha0, Ref{Float64}(NaN))
-    end
-end
-
-function (is::LinearStep)(ls, state, phi_0, dphi_0, df)
-    @views minX = mapreduce(
-        (up,u,x)-> up >= 0 ? (2*pi-x-u)/up : -(x+u)/up, min, 
-        state.s[length(is.x)+1:2*length(is.x)], state.x[length(is.x)+1:2*length(is.x)], is.x
-    )
-    @views minY = mapreduce(
-        (up,u,x)-> up >= 0 ? (2*pi-x-u)/up : -(x+u)/up, min, 
-        state.s[2*length(is.x)+1:3*length(is.x)], 
-        state.x[2*length(is.x)+1:3*length(is.x)], is.y
-    )
-    @views minZ = mapreduce(
-        (up,u,x)-> up >= 0 ? (2*pi-x-u)/up : -(x+u)/up, min,
-        state.s[3*length(is.x)+1:end], 
-        state.x[3*length(is.x)+1:end], is.z
-    )
-    max_alpha = min(minX, minY, minZ)
-    if !isfinite(is.dphi_0_previous[]) || !isfinite(state.alpha)
-        # If we're at the first iteration
-        alphaguess = is.alpha0
-    else
-        # state.alpha is the previously used step length
-        alphaguess = state.alpha * is.dphi_0_previous[] / dphi_0
-    end
-    is.dphi_0_previous[] = dphi_0
-    state.alpha = min(alphaguess, max_alpha)
-end
-
 """
     OptimizeState(state, primitiveRecipLattice, numPeaks)
 
@@ -62,70 +23,181 @@ usually ignored in the BCDI problem. This is described in [carnis_towards_2019](
 although this implimentation will be faster because a NUFFT is used instead of
 many FFTs.
 """
-struct OptimizeState <: Operator
+struct MRBCDI{I,T1,T2} <: Operator
     numPeaks::Int64
     AInv::CuArray{Float64, 2, CUDA.Mem.DeviceBuffer}
-    allU::CuArray{Float64, 2, CUDA.Mem.DeviceBuffer}
+    allU::CuArray{Float64, I, CUDA.Mem.DeviceBuffer}
     B::CuArray{Float64, 2, CUDA.Mem.DeviceBuffer}
+    losses::CuArray{Float64, 1, CUDA.Mem.DeviceBuffer}
+    iterations::Int64
+    ra0::Float64
+    ua0::Float64
+    alpha::Ref{Float64}
+    TVRegs::T1
+    BetaRegs::T2
 
-    function OptimizeState(state, primitiveRecipLattice, numPeaks)
-        allU = CUDA.zeros(3, length(state.ux))
-        B = CUDA.zeros(3, length(state.ux))
-        new(numPeaks, primitiveRecipLattice, allU, B)
+    function MRBCDI(state, primitiveRecipLattice, numPeaks, iterations, lambdaTV, lambdaBeta, a, b, c, alpha)
+        neighbors = CUDA.zeros(Int64, 6, length(state.keepInd))
+        inds = [
+            CartesianIndex(1,0,0), CartesianIndex(0,1,0), CartesianIndex(0,0,1),
+            CartesianIndex(-1,0,0), CartesianIndex(0,-1,0), CartesianIndex(0,0,-1)
+        ]
+        function myFind(a,b)
+            ret = findfirst(a,b)
+            if ret == nothing
+                return 0
+            end
+            return ret
+        end
+        function myMod(a,b)
+            return CartesianIndex(mod(a[1]-1,b[1])+1, mod(a[2]-1,b[2])+1, mod(a[3]-1,b[3])+1)
+        end
+        s = CartesianIndex(size(state.cores[1].intens))
+        for i in 1:length(inds)
+            neighs = vec(myFind.(isequal.(myMod.(state.keepInd .- inds[i], s)), Ref(vec(state.keepInd))))
+            neighbors[i,:] .= neighs
+        end
+
+        allU = CUDA.zeros(Float64, 4, size(state.keepInd)...)
+        B = CUDA.zeros(Float64, 3, length(state.keepInd))
+        losses = CUDA.zeros(Float64, length(state.cores))
+        TVRegs = [BcdiCore.TVReg(
+            lambdaTV * sqrt(reduce(+, state.cores[i].intens)) / reduce(+, state.support), neighbors
+        ) for i in 1:length(state.cores)]
+        BetaRegs = [BcdiCore.BetaReg(
+            lambdaBeta * sqrt(reduce(+, state.cores[i].intens)) / reduce(+, state.support), a, b, c
+        ) for i in 1:length(state.cores)]
+        new{ndims(allU),typeof(TVRegs),typeof(BetaRegs)}(
+            numPeaks, primitiveRecipLattice, allU, B, losses,
+            iterations, 1, 500, alpha, TVRegs, BetaRegs
+        )
     end
 end
 
-function operate(optimizeState::OptimizeState, state)
-    optimCore = rand(1:length(state.cores), optimizeState.numPeaks)
+function operate(mrbcdi::MRBCDI, state)
+    optimCore = StatsBase.sample(1:length(state.cores), mrbcdi.numPeaks, replace=false)
+    ki = CartesianIndices(state.keepInd)
+    iters = 0
+
+    function transform(x, ub, lb, a0)
+        return (ub-lb) * (tanh(x/a0)+1) / 2 + lb
+    end
+
+    function invTransform(x, ub, lb, a0)
+        return a0 * atanh( (lb+ub-2*max.(lb+0.001,min.(ub-0.001,x)) ) / (lb-ub) )
+    end
+
+    function dTransform(x, ub, lb, a0)
+        return (ub-lb) * sech(x/a0)^2 / (2*a0)
+    end
 
     function fg!(F,G,u)
+println("start")
         getF = F != nothing
         getG = G != nothing
         if getG
             G .= 0
         end
 
-        @views rho = u[1:length(state.ux)]
-        @views ux = u[length(state.ux)+1:2*length(state.ux)]
-        @views uy = u[2*length(state.ux)+1:3*length(state.ux)]
-        @views uz = u[3*length(state.ux)+1:end]
-
+        @views state.rho[state.keepInd] .= transform.(u[1,ki], 1, 0, mrbcdi.ra0)
+        @views state.ux[state.keepInd] .= transform.(u[2,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        @views state.uy[state.keepInd] .= transform.(u[3,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        @views state.uz[state.keepInd] .= transform.(u[4,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        mrbcdi.losses .= 0
         for i in optimCore
-            BcdiCore.setpts!(state.cores[i], state.x, state.y, state.z, rho, ux, uy, uz, getG)
+            if state.highStrain && state.rotations == nothing
+                @views BcdiCore.setpts!(
+                    state.cores[i], 
+                    state.xPos[1].+state.ux[state.keepInd], 
+                    state.yPos[1].+state.ux[state.keepInd], 
+                    state.yPos[1].+state.uz[state.keepInd], 
+                    state.rho[state.keepInd], state.ux[state.keepInd], 
+                    state.uy[state.keepInd], state.uz[state.keepInd], getG
+                )
+            elseif state.highStrain
+                @views BcdiCore.setpts!(
+                    state.cores[i], 
+                    state.xPos[i].+state.ux[state.keepInd], 
+                    state.yPos[i].+state.ux[state.keepInd], 
+                    state.yPos[i].+state.uz[state.keepInd],  
+                    state.rho[state.keepInd], state.ux[state.keepInd], 
+                    state.uy[state.keepInd], state.uz[state.keepInd], getG
+                )
+            elseif state.rotations != nothing
+                @views BcdiCore.setpts!(
+                    state.cores[i],
+                    state.xPos[i], state.yPos[i], state.yPos[i],
+                    state.rho[state.keepInd], state.ux[state.keepInd], 
+                    state.uy[state.keepInd], state.uz[state.keepInd], getG
+                )
+            else
+                @views BcdiCore.setpts!(
+                    state.cores[i], state.rho[state.keepInd], state.ux[state.keepInd], 
+                    state.uy[state.keepInd], state.uz[state.keepInd], getG
+                )
+            end
             loss = BcdiCore.loss(state.cores[i], getG, getF, false)
             if getF
-                F += loss
+                loss .+= BcdiCore.modifyLoss(state.cores[i], mrbcdi.TVRegs[i])
+                loss .+= BcdiCore.modifyLoss(state.cores[i], mrbcdi.BetaRegs[i])
+                mrbcdi.losses[i:i] .= loss
             end
             if getG
-                G[1:length(state.ux)] .+= state.cores[i].rhoDeriv
-                G[length(state.ux)+1:2*length(state.ux)] .+= state.cores[i].uxDeriv
-                G[2*length(state.ux)+1:3*length(state.ux)] .+= state.cores[i].uyDeriv
-                G[3*length(state.ux)+1:end] .+= state.cores[i].uzDeriv
+                BcdiCore.modifyDeriv(state.cores[i], mrbcdi.TVRegs[i])
+                BcdiCore.modifyDeriv(state.cores[i], mrbcdi.BetaRegs[i])
+                @views state.cores[i].rhoDeriv .*= dTransform.(u[1,ki], 1, 0, mrbcdi.ra0)
+                @views state.cores[i].uxDeriv .*= dTransform.(u[2,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+                @views state.cores[i].uyDeriv .*= dTransform.(u[3,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+                @views state.cores[i].uzDeriv .*= dTransform.(u[4,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
             end
         end
-        return F
+        if getG
+            for i in optimCore
+                G[1,ki] .+= state.cores[i].rhoDeriv
+                G[2,ki] .+= state.cores[i].uxDeriv
+                G[3,ki] .+= state.cores[i].uyDeriv
+                G[4,ki] .+= state.cores[i].uzDeriv
+            end
+            G ./= length(optimCore)
+
+            @views G[1,ki] .*= state.support[state.keepInd]
+            @views G[2,ki] .*= state.support[state.keepInd]
+            @views G[3,ki] .*= state.support[state.keepInd]
+            @views G[4,ki] .*= state.support[state.keepInd]
+        end
+
+println(reduce(+, mrbcdi.losses) / length(optimCore))
+println(reduce(+, state.rho .> 0.5))
+println(maximum(state.rho))
+        return reduce(+, mrbcdi.losses) / length(optimCore)
     end
 
-    res = Optim.minimizer(Optim.optimize(
-        Optim.only_fg!(fg!), vcat(state.rho, state.ux, state.uy, state.uz),
-        LBFGS(alphaguess=LinearStep(state, 1e-12), linesearch=MoreThuente()),
-        Optim.Options(iterations=1, g_abstol=-1.0, g_reltol=-1.0, x_abstol=-1.0, x_reltol=-1.0, f_abstol=-1.0, f_reltol=1e-3)
+    mrbcdi.allU[1,ki] .= invTransform.(state.rho[state.keepInd], 1, 0, mrbcdi.ra0)
+    mrbcdi.allU[2,ki] .= invTransform.(state.ux[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    mrbcdi.allU[3,ki] .= invTransform.(state.uy[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    mrbcdi.allU[4,ki] .= invTransform.(state.uz[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+
+    method = LBFGS(alphaguess=InitialPrevious(alpha=mrbcdi.alpha[]), linesearch=MoreThuente())
+    options = Optim.Options(
+        iterations=mrbcdi.iterations, g_abstol=-1.0, g_reltol=-1.0,
+        x_abstol=-1.0, x_reltol=-1.0, f_abstol=-1.0, f_reltol=-1.0
+    )
+    objective = Optim.promote_objtype(method, mrbcdi.allU, :finite, true, Optim.only_fg!(fg!))
+    init_state = Optim.initial_state(method, options, objective, mrbcdi.allU)
+    init_state.alpha = NaN
+    res = Optim.optimize(objective, mrbcdi.allU, method, options, init_state)
+
+    mrbcdi.allU .= Optim.minimizer(res)
+    mrbcdi.B .= transform.(mrbcdi.allU[2:4,vec(ki)], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    @views mrbcdi.allU[2:4,vec(ki)] .= mrbcdi.B .- 2 .* pi .* (mrbcdi.AInv \ floor.(
+        Int64, (mrbcdi.AInv * mrbcdi.B) ./ (2 .* pi) .+ 0.5
     ))
 
-    state.rho .= res[1:length(state.ux)]
-    state.ux .= res[length(state.ux)+1:2*length(state.ux)]
-    state.uy .= res[2*length(state.ux)+1:3*length(state.ux)]
-    state.uz .= res[3*length(state.ux)+1:end]
+    state.rho[state.keepInd] .= transform.(mrbcdi.allU[1,ki], 1, 0, mrbcdi.ra0)
+    state.ux[state.keepInd] .= mrbcdi.allU[2,ki]
+    state.uy[state.keepInd] .= mrbcdi.allU[3,ki]
+    state.uz[state.keepInd] .= mrbcdi.allU[4,ki]
 
-    optimizeState.allU[1,:] .= state.ux
-    optimizeState.allU[2,:] .= state.uy
-    optimizeState.allU[3,:] .= state.uz
-
-    optimizeState.B .= floor.(Int64, (optimizeState.AInv * optimizeState.allU) ./ (2 .* pi) .+ 0.5)
-    optimizeState.allU .-= 2 .* pi .* (optimizeState.AInv \ optimizeState.B)
-    state.ux .= optimizeState.allU[1,:]
-    state.uy .= optimizeState.allU[2,:]
-    state.uz .= optimizeState.allU[3,:]
 end
 
 function Base.:*(operator::Operator, state::State)
