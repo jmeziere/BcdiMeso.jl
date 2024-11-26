@@ -105,28 +105,26 @@ println("start")
         @views state.uz[state.keepInd] .= transform.(u[4,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
         mrbcdi.losses .= 0
         for i in optimCore
-            if state.highStrain && state.rotations == nothing
+            if state.rotations != nothing
                 @views BcdiCore.setpts!(
-                    state.cores[i], 
-                    state.xPos[1].+state.ux[state.keepInd], 
-                    state.yPos[1].+state.ux[state.keepInd], 
-                    state.yPos[1].+state.uz[state.keepInd], 
-                    state.rho[state.keepInd], state.ux[state.keepInd], 
+                    state.cores[i],
+                    state.xPos[i], state.yPos[i], state.zPos[i],
+                    state.rho[state.keepInd], state.ux[state.keepInd],
                     state.uy[state.keepInd], state.uz[state.keepInd], getG
                 )
             elseif state.highStrain
                 @views BcdiCore.setpts!(
                     state.cores[i], 
-                    state.xPos[i].+state.ux[state.keepInd], 
-                    state.yPos[i].+state.ux[state.keepInd], 
-                    state.yPos[i].+state.uz[state.keepInd],  
+                    state.xPos[1],
+                    state.yPos[1], 
+                    state.zPos[1], 
                     state.rho[state.keepInd], state.ux[state.keepInd], 
                     state.uy[state.keepInd], state.uz[state.keepInd], getG
                 )
             elseif state.rotations != nothing
                 @views BcdiCore.setpts!(
                     state.cores[i],
-                    state.xPos[i], state.yPos[i], state.yPos[i],
+                    state.xPos[i], state.yPos[i], state.zPos[i],
                     state.rho[state.keepInd], state.ux[state.keepInd], 
                     state.uy[state.keepInd], state.uz[state.keepInd], getG
                 )
@@ -137,9 +135,11 @@ println("start")
                 )
             end
             loss = BcdiCore.loss(state.cores[i], getG, getF, false)
+println(loss)
             if getF
                 loss .+= BcdiCore.modifyLoss(state.cores[i], mrbcdi.TVRegs[i])
                 loss .+= BcdiCore.modifyLoss(state.cores[i], mrbcdi.BetaRegs[i])
+println(loss)
                 mrbcdi.losses[i:i] .= loss
             end
             if getG
@@ -177,7 +177,7 @@ println(maximum(state.rho))
     mrbcdi.allU[3,ki] .= invTransform.(state.uy[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
     mrbcdi.allU[4,ki] .= invTransform.(state.uz[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
 
-    method = LBFGS(alphaguess=InitialPrevious(alpha=mrbcdi.alpha[]), linesearch=MoreThuente())
+    method = LBFGS(alphaguess=InitialPrevious(alpha=mrbcdi.alpha[]), linesearch=HagerZhang())
     options = Optim.Options(
         iterations=mrbcdi.iterations, g_abstol=-1.0, g_reltol=-1.0,
         x_abstol=-1.0, x_reltol=-1.0, f_abstol=-1.0, f_reltol=-1.0

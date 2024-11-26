@@ -95,7 +95,13 @@ struct State{T,I}
                 push!(zPos, baseZ)
                 keepInd = collect(vec(CartesianIndices(s)))
             end
-            h,k,l = BcdiCore.generateRecSpace(s)
+            if highStrain
+                h,k,l = BcdiCore.generateRecSpace(s)
+            else
+                h = CUDA.zeros(Float64,1)
+                k = CUDA.zeros(Float64,1)
+                l = CUDA.zeros(Float64,1)
+            end
             for i in 1:length(intens)
                 currIntens, currRecSupport, shift = BcdiCore.centerPeak(intens[i], recSupport[i], "center", truncRecSupport)
                 push!(cores, BcdiCore.MesoState("L2", true, currIntens, gVecs[i], h, k, l, currRecSupport))
