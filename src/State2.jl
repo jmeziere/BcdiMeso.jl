@@ -15,7 +15,9 @@ struct State{T,I}
     ux::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
     uy::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
     uz::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
-    muls::CuArray{Float64, 1, CUDA.Mem.DeviceBuffer}
+    disux::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
+    disuy::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
+    disuz::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
     support::CuArray{Bool, 3, CUDA.Mem.DeviceBuffer}
     cores::Vector{BcdiCore.MesoState}
     shifts::Vector{Tuple{Int64,Int64,Int64}}
@@ -33,7 +35,15 @@ struct State{T,I}
         ux = CUDA.zeros(Float64, s)
         uy = CUDA.zeros(Float64, s)
         uz = CUDA.zeros(Float64, s)
-        muls = CUDA.zeros(Float64, length(intens))
+        if highStrain
+            disux = CUDA.zeros(Float64, s)
+            disuy = CUDA.zeros(Float64, s)
+            disuz = CUDA.zeros(Float64, s)
+        else
+            disux = CUDA.zeros(Float64, 0,0,0)
+            disuy = CUDA.zeros(Float64, 0,0,0)
+            disuz = CUDA.zeros(Float64, 0,0,0)
+        end
         support = CUDA.ones(Bool, s)
 
         cores = BcdiCore.MesoState[]
@@ -44,8 +54,11 @@ struct State{T,I}
         zPos = []
         if rotations != nothing || highStrain
             nonuniform = true
-            disjoint = false
-
+            if highStrain
+                disjoint = true
+            else
+                disjoint = false
+            end
             baseX = zeros(Float64, s)
             baseY = zeros(Float64, s)
             baseZ = zeros(Float64, s)
@@ -102,37 +115,49 @@ struct State{T,I}
             end
             for i in 1:length(intens)
                 currIntens, currRecSupport, shift = BcdiCore.centerPeak(intens[i], recSupport[i], "center", truncRecSupport)
-                push!(cores, BcdiCore.MesoState("L2", false, currIntens, gVecs[i], currRecSupport, nonuniform, highStrain, disjoint))
+                push!(cores, BcdiCore.MesoState("L2", true, currIntens, gVecs[i], currRecSupport, nonuniform, highStrain, disjoint))
                 push!(shifts, shift)
             end
 
-            @views BcdiCore.setpts!(
-                cores[1],
-                xPos[1], yPos[1], zPos[1],
-                rho[keepInd], ux[keepInd], uy[keepInd], uz[keepInd], false
-            )
+            if highStrain
+                @views BcdiCore.setpts!(
+                    cores[1],
+                    xPos[1], yPos[1], zPos[1],
+                    rho[keepInd], ux[keepInd], uy[keepInd], uz[keepInd],
+                    disux[keepInd], disuy[keepInd], disuz[keepInd], false
+                )
+            else
+                @views BcdiCore.setpts!(
+                    cores[1],
+                    xPos[1], yPos[1], zPos[1],
+                    rho[keepInd], ux[keepInd], uy[keepInd], uz[keepInd], false
+                )
+            end
             randAngle = CuArray{Float64}(2 .* pi .* rand(size(cores[1].intens)...))
             cores[1].plan \ (sqrt.(cores[1].intens .* exp.(1im .* randAngle)) .* cores[1].recSupport)
-            rho[keepInd] .= abs.(cores[1].plan.realSpace)
-            rho ./= maximum(rho)
+#            rho[keepInd] .= abs.(cores[1].plan.realSpace)
+#            rho ./= maximum(rho)
+            rho .= 0
+            CUDA.@allowscalar rho[51,51,51] = 1
         else
-            nonuniform = false
-            disjoint = false
             for i in 1:length(intens)
                 currIntens, currRecSupport, shift = BcdiCore.centerPeak(intens[i], recSupport[i], "corner", truncRecSupport)
-                push!(cores, BcdiCore.MesoState("L2", false, currIntens, gVecs[i], currRecSupport, nonuniform, highStrain, disjoint))
+                push!(cores, BcdiCore.MesoState("L2", true, currIntens, gVecs[i], currRecSupport))
                 push!(shifts, shift)
             end
-            keepInd = collect(CartesianIndices(s))
+            keepInd = vec(collect(CartesianIndices(s)))
 
             randAngle = CuArray{Float64}(2 .* pi .* rand(size(cores[1].intens)...))
             cores[1].plan \ (sqrt.(cores[1].intens .* exp.(1im .* randAngle)) .* cores[1].recSupport)
             rho .= abs.(cores[1].plan.realSpace)
             rho ./= maximum(rho)
 
+            e1 = div(s[1], 2)
+            e2 = div(s[2], 2)
+            e3 = div(s[3], 2)
             rho .*= support
         end
-        new{typeof(rotations),ndims(keepInd)}(rho,ux,uy,uz,muls,support,cores,shifts,rotations,highStrain,xPos,yPos,zPos,keepInd)
+        new{typeof(rotations),ndims(keepInd)}(rho,ux,uy,uz,disux,disuy,disuz,support,cores,shifts,rotations,highStrain,xPos,yPos,zPos,keepInd)
     end
 end
 

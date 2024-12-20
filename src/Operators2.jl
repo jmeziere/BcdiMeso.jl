@@ -51,7 +51,7 @@ struct MRBCDI{I,T1,T2} <: Operator
         end
 
         kiArr = CUDA.zeros(Int64, size(state.cores[1].intens))
-        kiArr[vec(state.keepInd)] .= 1:length(state.keepInd)
+        kiArr[state.keepInd] .= 1:length(state.keepInd)
         for i in 1:length(inds)
             neighArr = circshift(kiArr, Tuple(inds[i]))
             findNeigh.(neighArr, kiArr, Ref(view(neighbors,i,:)))
@@ -65,16 +65,63 @@ struct MRBCDI{I,T1,T2} <: Operator
         B = CUDA.zeros(Float64, 3, length(state.keepInd))
         losses = CUDA.zeros(Float64, length(state.cores))
         TVRegs = [BcdiCore.TVReg(
-            lambdaTV * reduce(+, state.cores[i].intens) / reduce(+, state.support), neighbors
+            lambdaTV * sqrt(reduce(+, state.cores[i].intens)) / reduce(+, state.support), neighbors
         ) for i in 1:length(state.cores)]
         BetaRegs = [BcdiCore.BetaReg(
-            lambdaBeta * reduce(+, state.cores[i].intens) / reduce(+, state.support), a, b, c
+            lambdaBeta * sqrt(reduce(+, state.cores[i].intens)) / reduce(+, state.support), a, b, c
         ) for i in 1:length(state.cores)]
         new{ndims(allU),typeof(TVRegs),typeof(BetaRegs)}(
             numPeaks, primitiveRecipLattice, allU, B, losses,
             iterations, 1, 5000, alpha, TVRegs, BetaRegs
         )
     end
+end
+
+struct TVReg
+    lambda::Float64
+    neighbors::CuArray{Int64, 2, CUDA.Mem.DeviceBuffer}
+
+    function TVReg(lambda, neighbors)
+        newNeighs = CUDA.zeros(Int64, size(neighbors))
+        newNeighs[neighbors .!= nothing] .= neighbors[neighbors .!= nothing]
+        new(lambda, newNeighs)
+    end
+end
+
+function modifyDeriv(rho, ux, uy, uz, state, reg::TVReg)
+        for i in 1:6
+            @views inds = reg.neighbors[i,:] .!= 0
+            @views neighs = reg.neighbors[i,inds]
+
+            @views state.rhoDeriv[inds] .+= reg.lambda .* sign.(rho[inds] .- rho[reg.neighbors[i,inds]]) ./ 3
+            @views state.uxDeriv[inds] .+= reg.lambda .* sign.(ux[inds] .- ux[reg.neighbors[i,inds]]) ./ 3
+            @views state.uyDeriv[inds] .+= reg.lambda .* sign.(uy[inds] .- uy[reg.neighbors[i,inds]]) ./ 3
+            @views state.uzDeriv[inds] .+= reg.lambda .* sign.(uz[inds] .- uz[reg.neighbors[i,inds]]) ./ 3
+        end
+end
+
+function modifyLoss(rho, ux, uy, uz, reg::TVReg)
+    mLoss = CUDA.zeros(Float64, 1)
+    for i in 1:6
+        @views inds = reg.neighbors[i,:] .!= 0
+        @views mLoss .+= mapreduce(
+            (r,n) -> abs(r - n), +,
+            rho[inds], rho[reg.neighbors[i,inds]], dims=(1)
+        )
+        @views mLoss .+= mapreduce(
+            (u,n) -> abs(u - n), +,
+            ux[inds], ux[reg.neighbors[i,inds]], dims=(1)
+        )
+        @views mLoss .+= mapreduce(
+            (u,n) -> abs(u - n), +,
+            uy[inds], uy[reg.neighbors[i,inds]], dims=(1)
+        )
+        @views mLoss .+= mapreduce(
+            (u,n) -> abs(u - n), +,
+            uz[inds], uz[reg.neighbors[i,inds]], dims=(1)
+        )
+    end
+    return reg.lambda .* mLoss ./ 6
 end
 
 function transform(x, ub, lb, a0)
@@ -101,6 +148,11 @@ function fgMRBCDI!(F,G,u,mrbcdi,state,optimCore)
     @views state.ux[state.keepInd] .= transform.(u[2,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
     @views state.uy[state.keepInd] .= transform.(u[3,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
     @views state.uz[state.keepInd] .= transform.(u[4,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    if state.highStrain
+        @views state.disux[state.keepInd] .= transform.(u[5,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        @views state.disuy[state.keepInd] .= transform.(u[6,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        @views state.disuz[state.keepInd] .= transform.(u[7,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    end
     mrbcdi.losses .= 0
 println("start")
     for i in optimCore
@@ -118,7 +170,9 @@ println("start")
                 state.yPos[i],
                 state.zPos[i],
                 state.rho[state.keepInd], state.ux[state.keepInd],
-                state.uy[state.keepInd], state.uz[state.keepInd], getG
+                state.uy[state.keepInd], state.uz[state.keepInd],
+                state.disux[state.keepInd], state.disuy[state.keepInd], 
+                state.disuz[state.keepInd], getG
             )
         elseif state.rotations == nothing && state.highStrain
             @views BcdiCore.setpts!(
@@ -127,7 +181,9 @@ println("start")
                 state.yPos[1],
                 state.zPos[1],
                 state.rho[state.keepInd], state.ux[state.keepInd],
-                state.uy[state.keepInd], state.uz[state.keepInd], getG
+                state.uy[state.keepInd], state.uz[state.keepInd],
+                state.disux[state.keepInd], state.disuy[state.keepInd], 
+                state.disuz[state.keepInd], getG
             )
         elseif state.rotations == nothing && !state.highStrain
             @views BcdiCore.setpts!(
@@ -144,14 +200,17 @@ println(loss)
             mrbcdi.losses[i:i] .= loss
         end
         if getG
-println(maximum(abs.(state.cores[i].rhoDeriv)))
             BcdiCore.modifyDeriv(state.cores[i], mrbcdi.TVRegs[i])
             BcdiCore.modifyDeriv(state.cores[i], mrbcdi.BetaRegs[i])
-println(maximum(abs.(state.cores[i].rhoDeriv)))
             @views state.cores[i].rhoDeriv[ki] .*= dTransform.(u[1,ki], 1, 0, mrbcdi.ra0)
             @views state.cores[i].uxDeriv[ki] .*= dTransform.(u[2,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
             @views state.cores[i].uyDeriv[ki] .*= dTransform.(u[3,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
             @views state.cores[i].uzDeriv[ki] .*= dTransform.(u[4,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+            if state.highStrain
+                @views state.cores[i].disuxDeriv[ki] .*= dTransform.(u[5,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+                @views state.cores[i].disuyDeriv[ki] .*= dTransform.(u[6,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+                @views state.cores[i].disuzDeriv[ki] .*= dTransform.(u[7,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+            end
         end
     end
     if getG
@@ -160,12 +219,16 @@ println(maximum(abs.(state.cores[i].rhoDeriv)))
             G[2,ki] .+= state.cores[i].uxDeriv[ki]
             G[3,ki] .+= state.cores[i].uyDeriv[ki]
             G[4,ki] .+= state.cores[i].uzDeriv[ki]
+            if state.highStrain
+                G[5,ki] .+= state.cores[i].disuxDeriv[ki]
+                G[6,ki] .+= state.cores[i].disuyDeriv[ki]
+                G[7,ki] .+= state.cores[i].disuzDeriv[ki]
+            end
         end
         G ./= length(optimCore)
     end
 
 println(reduce(+, state.rho .> 0.5))
-println(reduce(+, state.support))
     return reduce(+, mrbcdi.losses) / length(optimCore)
 end
 
@@ -178,6 +241,11 @@ function operate(mrbcdi::MRBCDI, state)
     mrbcdi.allU[2,ki] .= invTransform.(state.ux[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
     mrbcdi.allU[3,ki] .= invTransform.(state.uy[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
     mrbcdi.allU[4,ki] .= invTransform.(state.uz[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    if state.highStrain
+        mrbcdi.allU[5,ki] .= invTransform.(state.disux[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        mrbcdi.allU[6,ki] .= invTransform.(state.disuy[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        mrbcdi.allU[7,ki] .= invTransform.(state.disuz[state.keepInd], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+    end
 
     method = LBFGS(alphaguess=InitialPrevious(alpha=mrbcdi.alpha[]), linesearch=MoreThuente())
     options = Optim.Options(
@@ -202,51 +270,11 @@ function operate(mrbcdi::MRBCDI, state)
     state.ux[state.keepInd] .= mrbcdi.allU[2,ki]
     state.uy[state.keepInd] .= mrbcdi.allU[3,ki]
     state.uz[state.keepInd] .= mrbcdi.allU[4,ki]
-end
-
-struct Center <: Operator
-    xArr::CuArray{Int64, 3, CUDA.Mem.DeviceBuffer}
-    yArr::CuArray{Int64, 3, CUDA.Mem.DeviceBuffer}
-    zArr::CuArray{Int64, 3, CUDA.Mem.DeviceBuffer}
-    space::CuArray{Float64, 3, CUDA.Mem.DeviceBuffer}
-
-    function Center(state)
-        s = size(state.rho)
-        xArr = zeros(Int64, s)
-        yArr = zeros(Int64, s)
-        zArr = zeros(Int64, s)
-        for i in 1:s[1]
-            for j in 1:s[2]
-                for k in 1:s[3]
-                    xArr[i,j,k] = i
-                    yArr[i,j,k] = j
-                    zArr[i,j,k] = k
-                end
-            end
-        end
-
-        space = CUDA.zeros(Float64, s)
-        support = CUDA.zeros(Int64, s)
-
-        new(xArr, yArr, zArr, space)
+    if state.highStrain
+        state.disux[state.keepInd] .= transform.(mrbcdi.allU[5,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        state.disuy[state.keepInd] .= transform.(mrbcdi.allU[6,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
+        state.disuz[state.keepInd] .= transform.(mrbcdi.allU[7,ki], 1.1*pi, -1.1*pi, mrbcdi.ua0)
     end
-end
-
-function operate(center::Center, state::State)
-    s = size(center.space)
-    if !state.highStrain && state.rotations == nothing
-        circshift!(center.space, state.rho, [s[1]//2,s[2]//2,s[3]//2])
-    else
-        center.space .= state.rho
-    end
-
-    n = reduce(+, center.space)
-    cenX = round(Int32, mapreduce((r,x)->r*x, +, center.space, center.xArr)/n)
-    cenY = round(Int32, mapreduce((r,x)->r*x, +, center.space, center.yArr)/n)
-    cenZ = round(Int32, mapreduce((r,x)->r*x, +, center.space, center.zArr)/n)
-
-    circshift!(center.space, state.rho, [s[1]//2+1-cenX, s[2]//2+1-cenY, s[3]//2+1-cenZ])
-    state.rho .= center.space
 end
 
 function Base.:*(operator::Operator, state::State)

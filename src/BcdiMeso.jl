@@ -1,4 +1,5 @@
 module BcdiMeso
+using Plots
     using CUDA
     using Optim
     using LineSearches
